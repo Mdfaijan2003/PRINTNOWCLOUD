@@ -63,7 +63,7 @@ export class PaymentService {
       amount: 0,
       currency: "INR" as const,
       method,
-      provider: method === PAYMENT_METHOD.ONLINE ? "RAZORPAY" : null,
+      provider: method === PAYMENT_METHOD.ONLINE ? ("RAZORPAY" as const) : null,
       providerPaymentId: null,
       idempotencyKey,
       status:
