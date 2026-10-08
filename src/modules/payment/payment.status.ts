@@ -1,0 +1,11 @@
+export const PAYMENT_STATUS = {
+  PENDING: "PENDING",
+  AWAITING_APPROVAL: "AWAITING_APPROVAL",
+  SUCCESSFUL: "SUCCESSFUL",
+  FAILED: "FAILED",
+  REJECTED: "REJECTED",
+  CANCELLED: "CANCELLED",
+} as const;
+
+export type PaymentStatus =
+  (typeof PAYMENT_STATUS)[keyof typeof PAYMENT_STATUS];
