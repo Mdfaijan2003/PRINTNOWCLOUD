@@ -122,4 +122,36 @@ export class PaymentController {
       next(error);
     }
   };
+
+  razorpayWebhook = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(400).json({
+          success: false,
+          message: "Raw webhook body is required",
+        });
+        return;
+      }
+
+      const signature = req.headers["x-razorpay-signature"];
+
+      if (typeof signature !== "string" || !signature) {
+        res.status(400).json({
+          success: false,
+          message: "Razorpay signature is missing",
+        });
+        return;
+      }
+
+      await this.paymentService.handleRazorpayWebhook(req.body, signature);
+
+      res.status(200).json({ success: true });
+    } catch (error) {
+      next(error);
+    }
+  };
 }

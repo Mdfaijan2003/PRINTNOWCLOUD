@@ -51,6 +51,12 @@ const paymentSchema = new Schema(
       default: null,
     },
 
+    providerOrderId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+
     idempotencyKey: {
       type: String,
       required: true,

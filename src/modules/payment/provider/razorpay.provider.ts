@@ -1,4 +1,5 @@
 import Razorpay from "razorpay";
+import crypto from "node:crypto";
 import type {
   CreatePaymentRequest,
   CreatePaymentResponse,
@@ -7,33 +8,72 @@ import type {
 
 export class RazorpayProvider implements PaymentProvider {
   private razorpay: Razorpay;
+  private readonly keyId: string;
 
   constructor() {
+    this.keyId = process.env.RAZORPAY_KEY_ID!;
+
     this.razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID!,
+      key_id: this.keyId,
       key_secret: process.env.RAZORPAY_KEY_SECRET!,
     });
+  }
+
+  getKeyId(): string {
+    return this.keyId;
   }
 
   async createPayment(
     request: CreatePaymentRequest,
   ): Promise<CreatePaymentResponse> {
     const order = await this.razorpay.orders.create({
-      amount: request.amount,
+      amount: request.amount * 100,
       currency: request.currency,
       receipt: request.referenceId,
     });
 
     return {
-      providerPaymentId: order.id,
+      providerOrderId: order.id,
       status: order.status,
       raw: order,
     };
   }
 
-  async verifyPayment(providerPaymentId: string): Promise<boolean> {
-    // Verification logic will be implemented
-    // with the actual UPI payment flow.
-    return true;
+  async verifyPayment(
+    orderId: string,
+    paymentId: string,
+    signature: string,
+  ): Promise<boolean> {
+    if (!orderId || !paymentId || !signature) {
+      return false;
+    }
+
+    const secret = process.env.RAZORPAY_KEY_SECRET;
+
+    if (!secret) {
+      throw new Error("Razorpay secret is not configured");
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", secret)
+      .update(`${orderId}|${paymentId}`)
+      .digest();
+
+    let receivedSignature: Buffer;
+
+    try {
+      receivedSignature = Buffer.from(signature, "hex");
+    } catch {
+      return false;
+    }
+
+    if (
+      receivedSignature.length !== expectedSignature.length ||
+      receivedSignature.toString("hex") !== signature.toLowerCase()
+    ) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(expectedSignature, receivedSignature);
   }
 }

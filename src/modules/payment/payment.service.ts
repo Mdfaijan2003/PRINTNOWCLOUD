@@ -1,18 +1,22 @@
 import mongoose from "mongoose";
 
 import { OutboxRepository } from "../../infrastructure/outbox/outbox.repository.js";
-import { PrintJobService } from "../printJob/printJob.service.js";
+import { PrintJobGrpcClient } from "../../infrastructure/grpc/grpc.client.js";
 import { PaymentRepository } from "./payment.repository.js";
 import { PAYMENT_EVENTS } from "./events/payment.event.js";
 import { PAYMENT_STATUS, type PaymentStatus } from "./payment.status.js";
 import { PAYMENT_METHOD, type PaymentMethod } from "./payment.types.js";
+import type { PaymentProvider } from "./provider/payment-provider.interface.js";
 import { canTransition } from "./payment.transition.js";
 import type { CreatePaymentInput } from "./payment.schema.js";
+import crypto from "node:crypto";
 
 export class PaymentService {
   constructor(
     private readonly paymentRepository: PaymentRepository,
     private readonly outboxRepository: OutboxRepository,
+    private readonly printJobGrpcClient: PrintJobGrpcClient,
+    private readonly paymentProvider: PaymentProvider,
   ) {}
 
   async createPayment(input: CreatePaymentInput) {
@@ -26,9 +30,6 @@ export class PaymentService {
     /*
      * Prevent multiple active payment attempts
      * for the same PrintJob.
-     *
-     * FAILED / REJECTED payments are not active,
-     * so retrying the same PrintJob is allowed.
      */
     const activePayment =
       await this.paymentRepository.findActiveByPrintJobId(printJobId);
@@ -38,32 +39,57 @@ export class PaymentService {
     }
 
     /*
-     * TODO:
-     * Fetch authoritative payment details from PrintJob
-     * through gRPC.
-     *
-     * This will give us:
-     * - amount
-     * - currency
-     * - payable status
+     * Fetch authoritative payment details
+     * from PrintJob service through gRPC.
      */
+    const printJob =
+      await this.printJobGrpcClient.getPaymentDetails(printJobId);
 
     /*
-     * TODO:
-     * Online:
-     *   create UPI payment/order
-     *
-     * Cash:
-     *   create approval flow
+     * Payment can only be created when
+     * the PrintJob is waiting for payment.
      */
+    if (printJob.status !== "PAYMENT_REQUIRED") {
+      throw new Error(
+        `PrintJob is not available for payment. Current status: ${printJob.status}`,
+      );
+    }
 
-    // Temporary structure until gRPC + provider flow is implemented.
+    /*
+     * Amount and currency are owned by PrintJob.
+     * Payment does not calculate or trust frontend values.
+     */
+    if (!Number.isInteger(printJob.amount) || printJob.amount <= 0) {
+      throw new Error("Invalid payment amount received from PrintJob");
+    }
+
+    if (!printJob.currency) {
+      throw new Error("Invalid payment currency received from PrintJob");
+    }
+
+    /*Check for payment method*/
+    let providerOrderId: string | null = null;
+
+    if (method === PAYMENT_METHOD.ONLINE) {
+      const providerPayment = await this.paymentProvider.createPayment({
+        amount: printJob.amount,
+        currency: printJob.currency,
+        referenceId: idempotencyKey,
+      });
+
+      providerOrderId = providerPayment.providerOrderId;
+    }
+
+    /*
+     * Create payment attempt.
+     */
     const paymentData = {
       printJobId,
-      amount: 0,
-      currency: "INR" as const,
+      amount: printJob.amount,
+      currency: printJob.currency as "INR",
       method,
       provider: method === PAYMENT_METHOD.ONLINE ? ("RAZORPAY" as const) : null,
+      providerOrderId,
       providerPaymentId: null,
       idempotencyKey,
       status:
@@ -73,7 +99,36 @@ export class PaymentService {
       customer,
     };
 
-    return this.paymentRepository.create(paymentData);
+    try {
+      const payment = await this.paymentRepository.create(paymentData);
+
+      if (method === PAYMENT_METHOD.ONLINE) {
+        return {
+          payment,
+          checkout: {
+            keyId: this.paymentProvider.getKeyId(),
+            orderId: payment.providerOrderId,
+            amount: payment.amount * 100,
+            currency: payment.currency,
+            customer,
+          },
+        };
+      }
+
+      return { payment };
+    } catch (error: unknown) {
+      if (this.isDuplicateKeyError(error)) {
+        /*
+         * Idempotency key collision should not normally happen
+         * because the key is generated internally.
+         */
+        if (this.isIdempotencyKeyDuplicate(error)) {
+          throw new Error("Payment request already exists");
+        }
+      }
+
+      throw error;
+    }
   }
 
   async getPaymentById(paymentId: string) {
@@ -165,6 +220,7 @@ export class PaymentService {
   private async completePayment(
     paymentId: string,
     currentStatus: PaymentStatus,
+    providerPaymentId?: string,
   ) {
     const nextStatus = PAYMENT_STATUS.SUCCESSFUL;
 
@@ -180,24 +236,26 @@ export class PaymentService {
       let updatedPayment;
 
       await session.withTransaction(async () => {
-        updatedPayment = await this.paymentRepository.transitionStatus(
-          paymentId,
-          currentStatus,
-          nextStatus,
-          session,
-        );
+        if (providerPaymentId) {
+          updatedPayment = await this.paymentRepository.markSuccessful(
+            paymentId,
+            currentStatus,
+            providerPaymentId,
+            session,
+          );
+        } else {
+          updatedPayment = await this.paymentRepository.transitionStatus(
+            paymentId,
+            currentStatus,
+            nextStatus,
+            session,
+          );
+        }
 
-        /*
-         * Atomic concurrency protection.
-         */
         if (!updatedPayment) {
           throw new Error("Payment status changed by another request");
         }
 
-        /*
-         * Payment state and domain event
-         * are committed together.
-         */
         await this.outboxRepository.create(
           {
             eventName: PAYMENT_EVENTS.SUCCESSFUL,
@@ -300,5 +358,131 @@ export class PaymentService {
     keyPattern?: Record<string, unknown>;
   }): boolean {
     return error.keyPattern?.idempotencyKey === 1;
+  }
+
+  private async failOnlinePayment(paymentId: string): Promise<void> {
+    const payment = await this.paymentRepository.findById(paymentId);
+
+    if (!payment) {
+      throw new Error("Payment not found");
+    }
+
+    if (
+      payment.method !== PAYMENT_METHOD.ONLINE ||
+      payment.status !== PAYMENT_STATUS.PENDING
+    ) {
+      // Duplicate or stale webhook: do not overwrite another status.
+      return;
+    }
+
+    const currentStatus = PAYMENT_STATUS.PENDING;
+    const nextStatus = PAYMENT_STATUS.FAILED;
+    const session = await mongoose.startSession();
+
+    try {
+      await session.withTransaction(async () => {
+        const updatedPayment = await this.paymentRepository.transitionStatus(
+          paymentId,
+          currentStatus,
+          nextStatus,
+          session,
+        );
+
+        // Another request may have updated the payment first.
+        if (!updatedPayment) return;
+
+        await this.outboxRepository.create(
+          {
+            eventName: PAYMENT_EVENTS.FAILED,
+            aggregateType: "Payment",
+            aggregateId: updatedPayment._id.toString(),
+            payload: {
+              paymentId: updatedPayment._id.toString(),
+              printJobId: updatedPayment.printJobId.toString(),
+            },
+          },
+          session,
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async handleRazorpayWebhook(
+    rawBody: Buffer,
+    signature: string,
+  ): Promise<void> {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    if (!secret) {
+      throw new Error("Razorpay webhook secret is not configured");
+    }
+
+    const expected = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest();
+
+    if (!/^[a-fA-F0-9]{64}$/.test(signature)) {
+      throw new Error("Invalid Razorpay webhook signature");
+    }
+
+    const received = Buffer.from(signature, "hex");
+
+    if (!crypto.timingSafeEqual(expected, received)) {
+      throw new Error("Invalid Razorpay webhook signature");
+    }
+
+    const event = JSON.parse(rawBody.toString("utf8"));
+
+    if (
+      event.event !== "payment.captured" &&
+      event.event !== "payment.failed"
+    ) {
+      return;
+    }
+
+    const providerPayment = event.payload?.payment?.entity;
+    const orderId = providerPayment?.order_id;
+
+    if (
+      !orderId ||
+      !Number.isInteger(providerPayment?.amount) ||
+      !providerPayment?.currency
+    ) {
+      throw new Error("Invalid payment data in Razorpay webhook");
+    }
+
+    const payment = await this.paymentRepository.findByProviderOrderId(orderId);
+
+    if (!payment) {
+      throw new Error("Payment not found for Razorpay order");
+    }
+
+    if (
+      providerPayment.amount !== payment.amount * 100 ||
+      providerPayment.currency !== payment.currency
+    ) {
+      throw new Error("Razorpay payment amount or currency mismatch");
+    }
+
+    if (event.event === "payment.captured") {
+      if (providerPayment.status !== "captured") {
+        throw new Error("Razorpay payment is not captured");
+      }
+
+      if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return;
+
+      await this.completePayment(
+        payment._id.toString(),
+        payment.status as PaymentStatus,
+        providerPayment.id,
+      );
+    } else {
+      if (payment.status !== PAYMENT_STATUS.PENDING) return;
+
+      await this.failOnlinePayment(payment._id.toString());
+    }
   }
 }

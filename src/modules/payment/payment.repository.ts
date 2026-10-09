@@ -61,4 +61,37 @@ export class PaymentRepository {
       },
     );
   }
+
+  async markSuccessful(
+    paymentId: string,
+    currentStatus: PaymentStatus,
+    providerPaymentId: string,
+    session: mongoose.ClientSession,
+  ) {
+    return PaymentModel.findOneAndUpdate(
+      {
+        _id: paymentId,
+        status: currentStatus,
+        method: "ONLINE",
+        provider: "RAZORPAY",
+      },
+      {
+        $set: {
+          status: "SUCCESSFUL",
+          providerPaymentId,
+        },
+      },
+      {
+        new: true,
+        session,
+      },
+    );
+  }
+
+  async findByProviderOrderId(orderId: string) {
+    return PaymentModel.findOne({
+      providerOrderId: orderId,
+      provider: "RAZORPAY",
+    });
+  }
 }

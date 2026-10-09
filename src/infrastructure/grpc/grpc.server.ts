@@ -2,10 +2,17 @@ import grpc from "@grpc/grpc-js";
 import protoLoader from "@grpc/proto-loader";
 import { fileURLToPath } from "node:url";
 import { PrintJobService } from "../../modules/printJob/printJob.service.js";
+import { printJobService } from "../../modules/printJob/printJob.container.js";
 
-const protoPath = fileURLToPath(new URL("./print_job.proto", import.meta.url));
+const protoPath = fileURLToPath(
+  new URL("./proto/printjob.proto", import.meta.url),
+);
+
+//We need to make it production ready by adding error handling, logging, and other necessary features. And also removing "as any"
 const grpcPackage = grpc.loadPackageDefinition(
-  protoLoader.loadSync(protoPath),
+  protoLoader.loadSync(protoPath, {
+    keepCase: true,
+  }),
 ) as any;
 
 export function createPrintJobGrpcService(printJobService: PrintJobService) {
@@ -29,10 +36,11 @@ export function createPrintJobGrpcService(printJobService: PrintJobService) {
   };
 }
 
-export function startPrintJobGrpcServer(printJobService: PrintJobService) {
+export function startPrintJobGrpcServer() {
   const server = new grpc.Server();
+
   server.addService(
-    grpcPackage.PrintJob.service,
+    grpcPackage.printjob.PrintJobService.service,
     createPrintJobGrpcService(printJobService),
   );
 

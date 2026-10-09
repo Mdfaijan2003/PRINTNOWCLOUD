@@ -5,7 +5,7 @@ export interface CreatePaymentRequest {
 }
 
 export interface CreatePaymentResponse {
-  providerPaymentId: string;
+  providerOrderId: string;
   status: string;
   raw?: unknown;
 }
@@ -13,5 +13,11 @@ export interface CreatePaymentResponse {
 export interface PaymentProvider {
   createPayment(request: CreatePaymentRequest): Promise<CreatePaymentResponse>;
 
-  verifyPayment(providerPaymentId: string): Promise<boolean>;
+  verifyPayment(
+    orderId: string,
+    paymentId: string,
+    signature: string,
+  ): Promise<boolean>;
+
+  getKeyId(): string;
 }
