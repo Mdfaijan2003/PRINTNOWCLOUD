@@ -2,6 +2,15 @@ import { Schema, model } from "mongoose";
 import { PAYMENT_METHOD, PAYMENT_PROVIDER } from "./payment.types.js";
 import { PAYMENT_STATUS } from "./payment.status.js";
 
+const customerSchema = new Schema(
+  {
+    name: { type: String, required: true },
+    phone: { type: String, required: true },
+    email: { type: String, required: true },
+  },
+  { _id: false },
+);
+
 const paymentSchema = new Schema(
   {
     printJobId: {
@@ -17,7 +26,7 @@ const paymentSchema = new Schema(
       min: 1,
       validate: {
         validator: Number.isInteger,
-        message: "Amount must be an integer",
+        message: "Amount must be an integer number of rupees",
       },
     },
 
@@ -42,7 +51,7 @@ const paymentSchema = new Schema(
 
     provider: {
       type: String,
-      enum: Object.values(PAYMENT_PROVIDER),
+      enum: [...Object.values(PAYMENT_PROVIDER), null],
       default: null,
     },
 
@@ -62,6 +71,11 @@ const paymentSchema = new Schema(
       required: true,
       unique: true,
       index: true,
+    },
+
+    customer: {
+      type: customerSchema,
+      required: true,
     },
   },
   {

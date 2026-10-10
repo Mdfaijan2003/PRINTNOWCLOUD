@@ -55,7 +55,7 @@ const printConfigurationSchema = z.object({
 const documentPrintJobItemSchema = z.object({
   type: z.literal("DOCUMENT"),
 
-  fileId: z.string().uuid(),
+  fileId: z.string().regex(/^[a-f\d]{24}$/i, "Invalid file ID"),
 
   pageCount: z.number().int().positive(),
 
@@ -73,7 +73,7 @@ const photoPrintConfigurationSchema = z.object({
 const photoPrintJobItemSchema = z.object({
   type: z.literal("PHOTO"),
 
-  fileId: z.string().uuid(),
+  fileId: z.string().regex(/^[a-f\d]{24}$/i, "Invalid file ID"),
 
   photoConfiguration: photoPrintConfigurationSchema,
 });

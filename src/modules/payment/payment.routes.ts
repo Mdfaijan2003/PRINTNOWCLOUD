@@ -22,5 +22,8 @@ export function createPaymentRouter(
   // Shop owner rejects cash payment
   router.post("/:id/reject", paymentController.rejectCashPayment);
 
+  //Webhook for payment gateway to notify payment status
+  router.post("/webhook/razorpay", paymentController.razorpayWebhook);
+
   return router;
 }

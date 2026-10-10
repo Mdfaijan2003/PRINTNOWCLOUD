@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import mongoose from "mongoose";
 
 import { OutboxRepository } from "../../infrastructure/outbox/outbox.repository.js";
@@ -9,7 +10,6 @@ import { PAYMENT_METHOD, type PaymentMethod } from "./payment.types.js";
 import type { PaymentProvider } from "./provider/payment-provider.interface.js";
 import { canTransition } from "./payment.transition.js";
 import type { CreatePaymentInput } from "./payment.schema.js";
-import crypto from "node:crypto";
 
 export class PaymentService {
   constructor(
@@ -419,14 +419,14 @@ export class PaymentService {
       throw new Error("Razorpay webhook secret is not configured");
     }
 
+    if (!Buffer.isBuffer(rawBody) || !/^[a-fA-F0-9]{64}$/.test(signature)) {
+      throw new Error("Invalid Razorpay webhook signature");
+    }
+
     const expected = crypto
       .createHmac("sha256", secret)
       .update(rawBody)
       .digest();
-
-    if (!/^[a-fA-F0-9]{64}$/.test(signature)) {
-      throw new Error("Invalid Razorpay webhook signature");
-    }
 
     const received = Buffer.from(signature, "hex");
 
@@ -434,30 +434,55 @@ export class PaymentService {
       throw new Error("Invalid Razorpay webhook signature");
     }
 
-    const event = JSON.parse(rawBody.toString("utf8"));
+    let event: {
+      event?: string;
+      payload?: {
+        payment?: {
+          entity?: {
+            id?: string;
+            order_id?: string;
+            amount?: number;
+            currency?: string;
+            status?: string;
+          };
+        };
+      };
+    };
 
-    if (
-      event.event !== "payment.captured" &&
-      event.event !== "payment.failed"
-    ) {
-      return;
+    try {
+      event = JSON.parse(rawBody.toString("utf8"));
+    } catch {
+      throw new Error("Invalid JSON in Razorpay webhook payload");
     }
+
+    // A failed payment event describes one attempt. The customer may retry
+    // against the same Razorpay order, so it must not fail the whole PrintNow
+    // payment record. We only finalize it after a verified captured event.
+    if (event.event === "payment.failed") return;
+    if (event.event !== "payment.captured") return;
 
     const providerPayment = event.payload?.payment?.entity;
     const orderId = providerPayment?.order_id;
+    const providerPaymentId = providerPayment?.id;
 
     if (
       !orderId ||
+      !providerPaymentId ||
       !Number.isInteger(providerPayment?.amount) ||
-      !providerPayment?.currency
+      !providerPayment?.currency ||
+      providerPayment.status !== "captured"
     ) {
-      throw new Error("Invalid payment data in Razorpay webhook");
+      throw new Error("Invalid captured payment data in Razorpay webhook");
     }
 
     const payment = await this.paymentRepository.findByProviderOrderId(orderId);
+    if (!payment) throw new Error("Payment not found for Razorpay order");
 
-    if (!payment) {
-      throw new Error("Payment not found for Razorpay order");
+    if (
+      payment.method !== PAYMENT_METHOD.ONLINE ||
+      payment.provider !== "RAZORPAY"
+    ) {
+      throw new Error("Razorpay order does not belong to an online payment");
     }
 
     if (
@@ -467,22 +492,13 @@ export class PaymentService {
       throw new Error("Razorpay payment amount or currency mismatch");
     }
 
-    if (event.event === "payment.captured") {
-      if (providerPayment.status !== "captured") {
-        throw new Error("Razorpay payment is not captured");
-      }
+    // Sequential duplicate delivery is idempotent.
+    if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return;
 
-      if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return;
-
-      await this.completePayment(
-        payment._id.toString(),
-        payment.status as PaymentStatus,
-        providerPayment.id,
-      );
-    } else {
-      if (payment.status !== PAYMENT_STATUS.PENDING) return;
-
-      await this.failOnlinePayment(payment._id.toString());
-    }
+    await this.completePayment(
+      payment._id.toString(),
+      payment.status as PaymentStatus,
+      providerPaymentId,
+    );
   }
 }

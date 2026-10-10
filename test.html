@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>PrintNow Payment Test</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+
+<body>
+  <h2>PrintNow Test Payment</h2>
+  <button id="pay">Pay Now</button>
+
+  <script>
+    const options = {
+      key: "rzp_test_Tlg3XxkLqXeFgA",
+      amount: 500,
+      currency: "INR",
+      name: "PrintNow",
+      description: "Test PrintJob Payment",
+      order_id: "order_Tm7yLUaOCibqoo",
+      prefill: {
+        name: "Faizan",
+        email: "faizan@example.com",
+        contact: "9876543210"
+      },
+      handler: function (response) {
+        console.log("Checkout response:", response);
+        alert("Checkout completed. Check backend webhook and database.");
+      }
+    };
+
+    document.getElementById("pay").onclick = function () {
+      new Razorpay(options).open();
+    };
+  </script>
+</body>
+
+</html>
