@@ -8,7 +8,7 @@
   "main": "server.ts",
   "scripts": {
     "dev": "tsx watch server.ts",
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/src/infrastructure/grpc/proto && cp src/infrastructure/grpc/proto/*.proto dist/src/infrastructure/grpc/proto/",
     "start": "node dist/server.js"
   },
   "dependencies": {
