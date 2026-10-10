@@ -149,6 +149,8 @@ export class PaymentController {
 
       await this.paymentService.handleRazorpayWebhook(req.body, signature);
 
+      console.log("RAZORPAY WEBHOOK RECEIVED");
+
       res.status(200).json({ success: true });
     } catch (error) {
       next(error);
