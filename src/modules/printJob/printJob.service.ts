@@ -1,5 +1,4 @@
-import crypto from "node:crypto";
-
+import mongoose from "mongoose";
 import { PrintJobRepository } from "./printJob.repository.js";
 
 import { PRINT_JOB_STATUS, type PrintJobStatus } from "./printJob.status.js";
@@ -14,6 +13,8 @@ import {
 
 import { calculateSelectedPages } from "../../shared/utils/calculateSelectedPages.js";
 
+import { PrintQueueRepository } from "../printingQueue/queue.repository.js";
+
 export type CreatePrintJobItemInput =
   | Omit<Extract<PrintJobItem, { type: "DOCUMENT" }>, "pricing">
   | Omit<Extract<PrintJobItem, { type: "PHOTO" }>, "pricing">;
@@ -23,7 +24,10 @@ export interface CreatePrintJobInput {
 }
 
 export class PrintJobService {
-  constructor(private readonly repository: PrintJobRepository) {}
+  constructor(
+    private readonly repository: PrintJobRepository,
+    private readonly queueRepository: PrintQueueRepository,
+  ) {}
 
   async createJob(input: CreatePrintJobInput): Promise<string> {
     if (!input.items?.length) {
@@ -135,5 +139,45 @@ export class PrintJobService {
     }
 
     return updatedJob;
+  }
+  /** Handles payment.successful; status update + queue insert are atomic and idempotent. */
+  async handlePaymentSuccessful(printJobId: string): Promise<void> {
+    if (!mongoose.isValidObjectId(printJobId))
+      throw new Error("Invalid PrintJob ID in payment event");
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const job = await this.repository.findByIdInSession(
+          printJobId,
+          session,
+        );
+        if (!job) throw new Error(`PrintJob not found: ${printJobId}`);
+
+        const existingEntry = await this.queueRepository.findByPrintJobId(
+          printJobId,
+          session,
+        );
+        if (existingEntry) {
+          if (job.status === PRINT_JOB_STATUS.QUEUED) return;
+          throw new Error(`Queue entry exists while PrintJob is ${job.status}`);
+        }
+
+        if (job.status === PRINT_JOB_STATUS.PAYMENT_REQUIRED) {
+          const updated = await this.repository.transitionToQueued(
+            printJobId,
+            session,
+          );
+          if (!updated)
+            throw new Error("PrintJob status changed before queuing");
+        } else if (job.status !== PRINT_JOB_STATUS.QUEUED) {
+          throw new Error(`Cannot queue PrintJob from status ${job.status}`);
+        }
+
+        // Repairs a QUEUED job whose queue record was absent; both commit together.
+        await this.queueRepository.createWaitingEntry(printJobId, session);
+      });
+    } finally {
+      await session.endSession();
+    }
   }
 }

@@ -56,7 +56,7 @@ export class PaymentRepository {
       },
 
       {
-        new: true,
+        returnDocument: "after",
         session,
       },
     );
@@ -82,7 +82,7 @@ export class PaymentRepository {
         },
       },
       {
-        new: true,
+        returnDocument: "after",
         session,
       },
     );
